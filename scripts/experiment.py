@@ -11,7 +11,6 @@ from transformer_ntk.utils import (
     set_seed,
     make_dataset,
     get_activation,
-    VBound,
     evaluate,
     CSVLogger,
 )
@@ -58,7 +57,8 @@ def train_pgd_fullbatch(
         opt.step()
 
         # Project onto product balls around init (per-parameter)
-        model.project_(rho_c=rho_c, rho_u=rho_u, rho_w=rho_w)
+        if rho_c and rho_u and rho_w:
+            model.project_(rho_c=rho_c, rho_u=rho_u, rho_w=rho_w)
 
         train_loss = float(loss.item())
         if train_loss < min_train:
@@ -106,12 +106,7 @@ def main():
     parser.add_argument(
         "--val_frac", type=float, default=0.2, help="validation fraction"
     )
-    parser.add_argument(
-        "--teacher-mc", type=int, default=2048, help="num MC samples for teacher"
-    )
-    parser.add_argument(
-        "--teacher-activation", type=str, default="tanh", choices=["tanh", "erf"]
-    )
+    parser.add_argument("--teacher-m", type=int, default=4096, help="Teacher width")
     parser.add_argument(
         "--teacher-nu",
         type=float,
@@ -126,7 +121,6 @@ def main():
         "--widths", type=str, nargs="+", default=["8", "16", "32", "64", "128", "256"]
     )
     parser.add_argument("--steps", type=int, default=2000)
-    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument(
         "--activation", type=str, default="tanh", choices=["tanh", "erf"]
     )
@@ -136,12 +130,17 @@ def main():
         "--pgd-radii",
         type=float,
         nargs=3,
-        default=[1.0, 1.0, 1.0],
+        default=[None, None, None],
         metavar=("rho_c", "rho_u", "rho_w"),
     )
 
     # Misc
-    parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",  # allows one or more values
+        default=[123],
+    )
     parser.add_argument(
         "--device", type=str, default="auto", choices=["auto", "cpu", "cuda"]
     )
@@ -150,7 +149,6 @@ def main():
     parser.add_argument("--log-curves", action="store_true", help="write per-step CSVs")
 
     args = parser.parse_args()
-    set_seed(args.seed)
 
     # Device
     if args.device == "auto":
@@ -167,97 +165,108 @@ def main():
     sweep_csv = runs_dir / f"{args.exp_name}.csv"
     logger = CSVLogger(str(sweep_csv))
 
-    # Build dataset via limit-model teacher
-    teacher_bounds = VBound(*args.teacher_nu)
-    X_all, y_all = make_dataset(
-        n=n,
-        d=d,
-        T=T,
-        num_mc_teacher=args.teacher_mc,
-        activation=args.teacher_activation,
-        bounds=teacher_bounds,
-        noise_std=args.noise_std,
-        device=device,
-    )
+    for seed in args.seeds:
+        set_seed(seed)
 
-    # Train/val split
-    n_val = int(args.val_frac * n)
-    idx = torch.randperm(n, device=device)
-    val_idx = idx[:n_val]
-    tr_idx = idx[n_val:]
+        # Build dataset via teacher model
+        # teacher_bounds = VBound(*args.teacher_nu)
+        sigma, _ = get_activation(args.activation)
+        teacher_model = TransformerNet(
+            d=d,
+            T=T,
+            m=args.teacher_m,
+            activation=sigma,
+            symmetric_init=False,
+            device=device,
+        ).to(device)
+        teacher_model.eval()
+        X_all, y_all = make_dataset(
+            n=n,
+            d=d,
+            T=T,
+            teacher_model=teacher_model,
+            R=16,
+            num_mc=args.teacher_m,
+            nu=3.0,
+            method="kernel",
+            device=device,
+        )
 
-    X_tr, y_tr = X_all[tr_idx], y_all[tr_idx]
-    X_val, y_val = X_all[val_idx], y_all[val_idx]
+        # Train/val split
+        n_val = int(args.val_frac * n)
+        idx = torch.randperm(n, device=device)
+        val_idx = idx[:n_val]
+        tr_idx = idx[n_val:]
 
-    # Student activation
-    sigma, _ = get_activation(args.activation)
+        X_tr, y_tr = X_all[tr_idx], y_all[tr_idx]
+        X_val, y_val = X_all[val_idx], y_all[val_idx]
 
-    # Sweep over widths
-    for m in widths:
-        if m % 2 != 0:
-            raise ValueError(
-                f"Width m={m} must be even for paired initialization (theory)."
+        # Sweep over widths
+        for m in widths:
+            if m % 2 != 0:
+                raise ValueError(
+                    f"Width m={m} must be even for paired initialization (theory)."
+                )
+
+            model = TransformerNet(
+                d=d, T=T, m=m, activation=sigma, symmetric_init=True, device=device
+            ).to(device)
+
+            # Optional per-step logging
+            curve_path = None
+            if args.log_curves:
+                curve_path = str(runs_dir / f"{args.exp_name}_curve_m{m}.csv")
+
+            lr = 1 / math.sqrt(args.steps)
+            min_tr, min_val, best_step = train_pgd_fullbatch(
+                model,
+                X_tr,
+                y_tr,
+                steps=args.steps,
+                lr=lr,
+                rho_c=args.pgd_radii[0],
+                rho_u=args.pgd_radii[1],
+                rho_w=args.pgd_radii[2],
+                X_val=X_val,
+                y_val=y_val,
+                log_curve_to=curve_path,
             )
 
-        model = TransformerNet(
-            d=d, T=T, m=m, activation=sigma, symmetric_init=True, device=device
-        ).to(device)
+            # Final evaluation (optional)
+            final_tr = evaluate(model, X_tr, y_tr)
+            final_val = evaluate(model, X_val, y_val)
 
-        # Optional per-step logging
-        curve_path = None
-        if args.log_curves:
-            curve_path = str(runs_dir / f"{args.exp_name}_curve_m{m}.csv")
+            logger.log(
+                {
+                    "seed": seed,
+                    "d": d,
+                    "T": T,
+                    "n": n,
+                    "val_frac": args.val_frac,
+                    "teacher_m": args.teacher_m,
+                    "teacher_nu_c": args.teacher_nu[0],
+                    "teacher_nu_u": args.teacher_nu[1],
+                    "teacher_nu_w": args.teacher_nu[2],
+                    "activation": args.activation,
+                    "rho_c": args.pgd_radii[0],
+                    "rho_u": args.pgd_radii[1],
+                    "rho_w": args.pgd_radii[2],
+                    "lr": lr,
+                    "steps": args.steps,
+                    "m": m,
+                    "min_train_loss": min_tr,
+                    "min_val_loss": min_val,
+                    "final_train_loss": final_tr,
+                    "final_val_loss": final_val,
+                    "best_step": best_step,
+                    "device": str(device),
+                }
+            )
 
-        min_tr, min_val, best_step = train_pgd_fullbatch(
-            model,
-            X_tr,
-            y_tr,
-            steps=args.steps,
-            lr=args.lr,
-            rho_c=args.pgd_radii[0],
-            rho_u=args.pgd_radii[1],
-            rho_w=args.pgd_radii[2],
-            X_val=X_val,
-            y_val=y_val,
-            log_curve_to=curve_path,
-        )
-
-        # Final evaluation (optional)
-        final_tr = evaluate(model, X_tr, y_tr)
-        final_val = evaluate(model, X_val, y_val)
-
-        logger.log(
-            {
-                "seed": args.seed,
-                "d": d,
-                "T": T,
-                "n": n,
-                "val_frac": args.val_frac,
-                "teacher_mc": args.teacher_mc,
-                "teacher_activation": args.teacher_activation,
-                "teacher_nu_c": args.teacher_nu[0],
-                "teacher_nu_u": args.teacher_nu[1],
-                "teacher_nu_w": args.teacher_nu[2],
-                "student_activation": args.activation,
-                "rho_c": args.pgd_radii[0],
-                "rho_u": args.pgd_radii[1],
-                "rho_w": args.pgd_radii[2],
-                "lr": args.lr,
-                "steps": args.steps,
-                "m": m,
-                "min_train_loss": min_tr,
-                "min_val_loss": min_val,
-                "final_train_loss": final_tr,
-                "final_val_loss": final_val,
-                "best_step": best_step,
-                "device": str(device),
-            }
-        )
-
-        print(
-            f"[m={m:>4}] min_train={min_tr:.6f}  min_val={min_val:.6f}  "
-            f"final_train={final_tr:.6f} final_val={final_val:.6f}  best_step={best_step}"
-        )
+            print(
+                f"[m={m:>4}] min_train={min_tr:.6f}  min_val={min_val:.6f}  "
+                f"final_train={final_tr:.6f} final_val={final_val:.6f}  best_step={best_step}"
+            )
 
     print(f"✓ Sweep complete. Results at: {sweep_csv}")
 

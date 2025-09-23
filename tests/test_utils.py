@@ -10,16 +10,12 @@ from transformer_ntk.utils import (
     default_v_maps,
     teacher_predict_tilde_f,
     make_dataset,
-    gd_step_with_projection,
 )
-from transformer_ntk.model import TransformerNet
 
 import csv
-import math
 import pytest
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 def test_set_seed_repro():
@@ -93,31 +89,6 @@ def test_make_dataset_shapes_and_nonconstant():
     assert y.shape == (n,)
     # Should not be a constant vector (very unlikely)
     assert y.std() > 0.0
-
-
-def test_gd_step_with_projection_runs(tmp_path):
-    set_seed(5)
-    d, T, m, n = 6, 7, 8, 128
-    model = TransformerNet(d=d, T=T, m=m, symmetric_init=True)  # f=0 at init
-    X, y = make_dataset(n, d, T, num_mc_teacher=256, activation="tanh", noise_std=0.0)
-    Xb = X  # full batch
-    yb = y
-    # One step GD + projection should run and keep within radii
-    loss0 = F.mse_loss(model(Xb), yb).item()
-    val = gd_step_with_projection(
-        model, Xb, yb, lr=1e-2, rho_c=0.5, rho_u=1.0, rho_w=1.0
-    )
-    assert isinstance(val, float)
-    # Check projection bounds
-    scale = 1.0 / math.sqrt(m)
-    W_diff = (model.W - model.W0).reshape(m, -1).norm(dim=1)
-    U_diff = (model.U - model.U0).norm(dim=1)
-    c_diff = (model.c - model.c0).abs()
-    assert torch.all(W_diff <= 1.0 * scale + 1e-7)
-    assert torch.all(U_diff <= 1.0 * scale + 1e-7)
-    assert torch.all(c_diff <= 0.5 * scale + 1e-7)
-    # Loss should be finite (may or may not decrease in a single step)
-    assert math.isfinite(loss0) and math.isfinite(val)
 
 
 def test_evaluating_context_restores_mode():
