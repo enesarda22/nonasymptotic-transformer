@@ -1,4 +1,4 @@
-from transformer_ntk.model import TransformerNet
+from transformer_ntk.model import Transformer
 
 import math
 import pytest
@@ -15,14 +15,14 @@ def set_seed(seed: int = 0):
 def test_zero_output_at_init_even_m(d, T, m, B):
     """Paired init (even m) ⇒ f(X;ϕ)=0 for any X."""
     set_seed(123)
-    model = TransformerNet(d=d, T=T, m=m, symmetric_init=True)
+    model = Transformer(d=d, T=T, m=m, symmetric_init=True)
     X = torch.randn(B, d, T)
     with torch.no_grad():
         out = model(X)
     assert torch.allclose(out, torch.zeros(B, dtype=out.dtype), atol=1e-6)
 
 
-def manual_forward(model: TransformerNet, X: torch.Tensor) -> torch.Tensor:
+def manual_forward(model: Transformer, X: torch.Tensor) -> torch.Tensor:
     """Compute f(X) per the paper definition (for cross-check)."""
     if X.dim() == 2:
         X = X.unsqueeze(0)
@@ -41,7 +41,7 @@ def manual_forward(model: TransformerNet, X: torch.Tensor) -> torch.Tensor:
 def test_forward_matches_manual(d, T, m, B):
     """Numerical check: module forward == manual formula."""
     set_seed(42)
-    model = TransformerNet(d=d, T=T, m=m, symmetric_init=False)
+    model = Transformer(d=d, T=T, m=m, symmetric_init=False)
     X = torch.randn(B, d, T)
     with torch.no_grad():
         out1 = model(X)
@@ -53,7 +53,7 @@ def test_forward_matches_manual(d, T, m, B):
 def test_nonzero_output_if_no_symmetric_init(d, T, m, B):
     """Without paired init, output is generally nonzero."""
     set_seed(7)
-    model = TransformerNet(d=d, T=T, m=m, symmetric_init=False)
+    model = Transformer(d=d, T=T, m=m, symmetric_init=False)
     X = torch.randn(B, d, T)
     with torch.no_grad():
         out = model(X)
@@ -64,7 +64,7 @@ def test_nonzero_output_if_no_symmetric_init(d, T, m, B):
 def test_projection_keeps_within_radii(d, T, m):
     """PGD projection respects per-parameter radii around init."""
     set_seed(11)
-    model = TransformerNet(d=d, T=T, m=m, symmetric_init=True)
+    model = Transformer(d=d, T=T, m=m, symmetric_init=True)
     # Nudge params away from init
     with torch.no_grad():
         model.W.add_(torch.randn_like(model.W))
@@ -89,7 +89,7 @@ def test_projection_keeps_within_radii(d, T, m):
 def test_backward_runs_and_grad_shapes(d, T, m, B):
     """Backprop produces finite grads with correct shapes."""
     set_seed(99)
-    model = TransformerNet(d=d, T=T, m=m, symmetric_init=False)
+    model = Transformer(d=d, T=T, m=m, symmetric_init=False)
     X = torch.randn(B, d, T, requires_grad=False)
     y = torch.randn(B)
 
@@ -110,7 +110,7 @@ def test_backward_runs_and_grad_shapes(d, T, m, B):
 def test_T_equals_one_edge_case(d, T, m, B):
     """When T=1, softmax=1, so a(X;W)=X and forward reduces accordingly."""
     set_seed(21)
-    model = TransformerNet(d=d, T=T, m=m, symmetric_init=False)
+    model = Transformer(d=d, T=T, m=m, symmetric_init=False)
     X = torch.randn(B, d, T)  # last col is the only col
     with torch.no_grad():
         out_model = model(X)

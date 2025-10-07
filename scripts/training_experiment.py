@@ -1,97 +1,20 @@
 import argparse
 import math
+import time
 from pathlib import Path
-from typing import List, Tuple
 
 import torch
-import torch.nn.functional as F
 
-from transformer_ntk.model import TransformerNet
+from transformer_ntk.data import make_dataset
+from transformer_ntk.model import Transformer
 from transformer_ntk.utils import (
     set_seed,
-    make_dataset,
-    get_activation,
     evaluate,
     CSVLogger,
+    parse_int_list,
+    get_activation,
+    train_pgd_fullbatch,
 )
-
-
-def train_pgd_fullbatch(
-    model: TransformerNet,
-    X_tr: torch.Tensor,
-    y_tr: torch.Tensor,
-    *,
-    steps: int,
-    lr: float,
-    rho_c: float,
-    rho_u: float,
-    rho_w: float,
-    X_val: torch.Tensor = None,
-    y_val: torch.Tensor = None,
-    log_curve_to: str = None,
-) -> Tuple[float, float, int]:
-    """
-    Full-batch PGD training loop.
-    Returns: (min_train_loss, min_val_loss, best_step)
-    """
-    device = next(model.parameters()).device
-    X_tr = X_tr.to(device)
-    y_tr = y_tr.to(device)
-    if X_val is not None:
-        X_val = X_val.to(device)
-        y_val = y_val.to(device)
-
-    opt = torch.optim.SGD(model.parameters(), lr=lr)
-
-    min_train = math.inf
-    min_val = math.inf
-    best_step = -1
-
-    curve_logger = CSVLogger(log_curve_to) if log_curve_to else None
-
-    for s in range(steps):
-        opt.zero_grad(set_to_none=True)
-        pred = model(X_tr)
-        loss = F.mse_loss(pred, y_tr)
-        loss.backward()
-        opt.step()
-
-        # Project onto product balls around init (per-parameter)
-        if rho_c and rho_u and rho_w:
-            model.project_(rho_c=rho_c, rho_u=rho_u, rho_w=rho_w)
-
-        train_loss = float(loss.item())
-        if train_loss < min_train:
-            min_train = train_loss
-            best_step = s
-
-        if X_val is not None:
-            with torch.no_grad():
-                val_pred = model(X_val)
-                val_loss = float(F.mse_loss(val_pred, y_val).item())
-                if val_loss < min_val:
-                    min_val = val_loss
-
-        if curve_logger:
-            row = {"step": s, "train_loss": train_loss}
-            if X_val is not None:
-                row["val_loss"] = val_loss
-            curve_logger.log(row)
-
-    if X_val is None:
-        min_val = float("nan")
-    return min_train, min_val, best_step
-
-
-def parse_int_list(xs: List[str]) -> List[int]:
-    out = []
-    for x in xs:
-        if "," in x:
-            out.extend(int(t) for t in x.split(",") if t.strip())
-        else:
-            out.append(int(x))
-    # unique & sorted (optional)
-    return sorted(set(out))
 
 
 def main():
@@ -152,7 +75,12 @@ def main():
 
     # Device
     if args.device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
     else:
         device = torch.device(args.device)
 
@@ -164,32 +92,24 @@ def main():
     runs_dir.mkdir(parents=True, exist_ok=True)
     sweep_csv = runs_dir / f"{args.exp_name}.csv"
     logger = CSVLogger(str(sweep_csv))
+    sigma, _ = get_activation(args.activation)
 
     for seed in args.seeds:
         set_seed(seed)
 
         # Build dataset via teacher model
         # teacher_bounds = VBound(*args.teacher_nu)
-        sigma, _ = get_activation(args.activation)
-        teacher_model = TransformerNet(
-            d=d,
-            T=T,
-            m=args.teacher_m,
-            activation=sigma,
-            symmetric_init=False,
-            device=device,
-        ).to(device)
-        teacher_model.eval()
         X_all, y_all = make_dataset(
             n=n,
             d=d,
             T=T,
-            teacher_model=teacher_model,
+            activation=args.activation,
             R=16,
             num_mc=args.teacher_m,
             nu=3.0,
-            method="kernel",
+            method="teacher",
             device=device,
+            seed=seed,
         )
 
         # Train/val split
@@ -203,12 +123,13 @@ def main():
 
         # Sweep over widths
         for m in widths:
+            t0 = time.perf_counter()
             if m % 2 != 0:
                 raise ValueError(
                     f"Width m={m} must be even for paired initialization (theory)."
                 )
 
-            model = TransformerNet(
+            model = Transformer(
                 d=d, T=T, m=m, activation=sigma, symmetric_init=True, device=device
             ).to(device)
 
@@ -217,7 +138,7 @@ def main():
             if args.log_curves:
                 curve_path = str(runs_dir / f"{args.exp_name}_curve_m{m}.csv")
 
-            lr = 1 / math.sqrt(args.steps)
+            lr = 1.75 / math.sqrt(args.steps)
             min_tr, min_val, best_step = train_pgd_fullbatch(
                 model,
                 X_tr,
@@ -262,10 +183,12 @@ def main():
                     "device": str(device),
                 }
             )
+            dt = time.perf_counter() - t0
 
             print(
                 f"[m={m:>4}] min_train={min_tr:.6f}  min_val={min_val:.6f}  "
-                f"final_train={final_tr:.6f} final_val={final_val:.6f}  best_step={best_step}"
+                f"final_train={final_tr:.6f} final_val={final_val:.6f}  best_step={best_step}  "
+                f"time_passed:{dt:.6f}s    "
             )
 
     print(f"✓ Sweep complete. Results at: {sweep_csv}")
