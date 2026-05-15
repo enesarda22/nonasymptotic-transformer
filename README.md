@@ -1,8 +1,11 @@
-# Finite-Time Analysis of Gradient Descent for Shallow Transformers
+# transformer-ntk
 
-Enes Arda, Semih Cayci, Atilla Eryilmaz &nbsp;·&nbsp; *AISTATS 2026*
+Code accompanying the paper:
 
-[arXiv](https://arxiv.org/abs/2601.16514) &nbsp;·&nbsp; [OpenReview](https://openreview.net/forum?id=FmLMB2B0qH)
+> **Finite-Time Analysis of Gradient Descent for Shallow Transformers**
+> Enes Arda, Semih Cayci, Atilla Eryilmaz
+> *AISTATS 2026*
+> [arXiv](https://arxiv.org/abs/2601.16514) &nbsp;·&nbsp; [OpenReview](https://openreview.net/forum?id=FmLMB2B0qH)
 
 We give a finite-time convergence guarantee for projected (stochastic) gradient descent on a single-layer multi-head transformer with softmax attention. The bound is sequence-length uniform and tracks the NTK linearization regime; experiments verify the predicted width and length scalings.
 
