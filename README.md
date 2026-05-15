@@ -1,4 +1,4 @@
-# transformer-ntk
+# nonasymptotic-transformer
 
 Code accompanying the paper:
 
